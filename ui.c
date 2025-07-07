@@ -1,5 +1,7 @@
 #include <stddef.h> // for NULL
 #include <stdio.h>  // for snprintf
+#include <string.h>
+#include <float.h>
 
 #include "raylib.h"
 #include "raymath.h"
@@ -302,6 +304,290 @@ void DrawTopNodeAndConnections(Node *head, Context *context) {
     }
 }
 
+// function that draws scene outline
+void DrawSceneOutlines(Context *context) {
+    Vector2 mouse = GetMousePosition();
+    bool cursorOverridden = false;
+
+    for (int i = 0; i < context->sceneList.count; i++) {
+        SceneOutline *scene = &context->sceneList.scenes[i];
+
+        // === Label Setup ===
+        int fontSize = 12;
+        float iconSize = 16.0f;
+        float iconPadding = 4.0f; 
+        float labelHeight = 20.0f;
+        char labelBuffer[64];
+        snprintf(labelBuffer, sizeof(labelBuffer), "Scene: %s",
+                 scene->name[0] != '\0' ? scene->name : "Unnamed");
+
+        Vector2 textSize = MeasureTextEx(globalFont, labelBuffer, fontSize, 1);
+        float labelPadding = 12.0f;
+        float labelWidth = textSize.x + labelPadding;
+        float minSceneWidth = labelWidth + iconSize + 2 * iconPadding;
+
+        Rectangle labelBar = {
+            scene->bounds.x,
+            scene->bounds.y,
+            labelWidth,
+            labelHeight
+        };
+
+        // === Dragging via label ===
+        if (!context->isResizingScene && !context->isResizingSceneVertically &&
+            !context->draggedScene && CheckCollisionPointRec(mouse, labelBar) && (!context->draggedNode)) {
+            SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
+            cursorOverridden = true;
+        }
+
+        if (!context->draggedScene && CheckCollisionPointRec(mouse, labelBar) &&
+            IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            context->draggedScene = scene;
+            context->sceneDragOffset = Vector2Subtract(mouse, (Vector2){scene->bounds.x, scene->bounds.y});
+        }
+
+        if (context->draggedScene == scene && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+            Vector2 newPos = Vector2Subtract(mouse, context->sceneDragOffset);
+            Rectangle newBounds = {
+                newPos.x,
+                newPos.y,
+                scene->bounds.width,
+                scene->bounds.height
+            };
+
+            // Prevent overlap with other scenes
+            bool overlaps = false;
+            for (int i = 0; i < context->sceneList.count; i++) {
+                SceneOutline *other = &context->sceneList.scenes[i];
+                
+                if (other == scene) continue;
+
+                if (CheckCollisionRecs(newBounds, other->bounds)) {
+                    overlaps = true;
+                    break;
+                }
+            }
+
+            if (!overlaps) {
+                Vector2 oldPos = { scene->bounds.x, scene->bounds.y };
+                Vector2 delta = Vector2Subtract(newPos, oldPos);
+
+                // Move the scene
+                scene->bounds.x = newPos.x;
+                scene->bounds.y = newPos.y;
+
+                // Move all contained nodes
+                for (int n = 0; n < scene->nodeCount; n++) {
+                    Node *node = scene->containedNodes[n];
+                    node->position = Vector2Add(node->position, delta);
+                    UpdateConnectorPositions(node);
+                }
+
+                // Move all connected bezier curves of scene nodes
+                for (int b = 0; b < context->bezierCount; b++) {
+                    BezierCurve *curve = &context->permanentBeziers[b];
+
+                    for (int n = 0; n < scene->nodeCount; n++) {
+                        Node *node = scene->containedNodes[n];
+
+                        if (curve->fromNode == node || curve->toNode == node) {
+                            for (int j = 0; j < 4; j++) {
+                                curve->points[j] = Vector2Add(curve->points[j], delta);
+                            }
+                            break; // Only process once per curve
+                        }
+                    }
+                }
+            }
+        }
+
+        if (context->draggedScene == scene && IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+            context->draggedScene = NULL;
+        }
+
+        // === Resize logic (unchanged) ===
+        float resizeMargin = 12.0f;
+        float resizeVerticalPadding = 32.0f;
+        float bottomResizeMargin = 12.0f;
+        float bottomHorizontalPadding = 32.0f;
+
+        Rectangle rightEdge = {
+            scene->bounds.x + scene->bounds.width - resizeMargin / 2,
+            scene->bounds.y + resizeVerticalPadding,
+            resizeMargin,
+            scene->bounds.height - 2 * resizeVerticalPadding
+        };
+        bool hoveringRight = CheckCollisionPointRec(mouse, rightEdge);
+
+        if (!context->isDragging && !context->isDrawingScene && !context->draggedNode 
+            && !context->draggedScene && hoveringRight){
+            SetMouseCursor(MOUSE_CURSOR_RESIZE_EW);
+            cursorOverridden = true;
+        }
+
+        if (!context->isResizingScene && hoveringRight && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            context->isResizingScene = true;
+            context->resizingScene = scene;
+            context->resizeStartX = mouse.x;
+            context->initialSceneWidth = scene->bounds.width;
+        }
+
+        Rectangle bottomEdge = {
+            scene->bounds.x + bottomHorizontalPadding,
+            scene->bounds.y + scene->bounds.height - bottomResizeMargin / 2,
+            scene->bounds.width - 2 * bottomHorizontalPadding,
+            bottomResizeMargin
+        };
+        bool hoveringBottom = CheckCollisionPointRec(mouse, bottomEdge);
+
+        if (!context->isDragging && !context->isDrawingScene &&
+            !context->draggedNode && !context->draggedScene && hoveringBottom) {
+            SetMouseCursor(MOUSE_CURSOR_RESIZE_NS);
+            cursorOverridden = true;
+        }
+
+        if (!context->isResizingSceneVertically && hoveringBottom && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            context->isResizingSceneVertically = true;
+            context->resizingScene = scene;
+            context->resizeStartY = mouse.y;
+            context->initialSceneHeight = scene->bounds.height;
+        }
+
+        Rectangle cornerEdge = {
+            scene->bounds.x + scene->bounds.width - bottomHorizontalPadding / 2,
+            scene->bounds.y + scene->bounds.height - resizeVerticalPadding / 2,
+            bottomHorizontalPadding,
+            resizeVerticalPadding
+        };
+        bool hoveringCorner = CheckCollisionPointRec(mouse, cornerEdge);
+
+        if (!context->isDragging && !context->isDrawingScene &&
+            !context->draggedNode && !context->draggedScene && hoveringCorner) {
+            SetMouseCursor(MOUSE_CURSOR_RESIZE_NWSE);
+            cursorOverridden = true;
+        }
+
+        if (!context->isResizingScene && !context->isResizingSceneVertically &&
+            hoveringCorner && IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && (!context->draggedNode)) {
+            context->isResizingScene = true;
+            context->isResizingSceneVertically = true;
+            context->resizingScene = scene;
+            context->resizeStartX = mouse.x;
+            context->resizeStartY = mouse.y;
+            context->initialSceneWidth = scene->bounds.width;
+            context->initialSceneHeight = scene->bounds.height;
+        }
+
+        if (context->resizingScene == scene && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+            if (context->isResizingScene) {
+                float deltaX = mouse.x - context->resizeStartX;
+                scene->bounds.width = fmaxf(context->initialSceneWidth + deltaX, minSceneWidth);
+            }
+            if (context->isResizingSceneVertically) {
+                float deltaY = mouse.y - context->resizeStartY;
+                scene->bounds.height = fmaxf(context->initialSceneHeight + deltaY, 40);
+            }
+        }
+
+        if ((context->isResizingScene || context->isResizingSceneVertically) &&
+            context->resizingScene == scene && IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+            context->isResizingScene = false;
+            context->isResizingSceneVertically = false;
+            context->resizingScene = NULL;
+            SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        }
+
+        // === Draw Scene Border and Label ===
+        DrawRectangleLinesEx(scene->bounds, 2, DARKGREEN);
+        DrawRectangleRec(labelBar, DARKGREEN);
+
+        Vector2 textPos = {
+            labelBar.x + 6,
+            labelBar.y + (labelBar.height - textSize.y) / 2
+        };
+        DrawTextEx(globalFont, labelBuffer, textPos, fontSize, 1, WHITE);
+
+        // === Icons and behaviors ===
+        Scene_ShrinkClick(scene, context);
+        Scene_DeleteClick(scene, context);
+    }
+
+    // === Live Drawing Preview ===
+    if (context->isDrawingScene) {
+        Vector2 mouse = GetMousePosition();
+        Vector2 start = context->sceneStartPos;
+
+        Vector2 topLeft = {
+            fminf(start.x, mouse.x),
+            fminf(start.y, mouse.y)
+        };
+        Vector2 size = {
+            fabsf(mouse.x - start.x),
+            fabsf(mouse.y - start.y)
+        };
+
+        Rectangle previewBounds = {topLeft.x, topLeft.y, size.x, size.y};
+
+        bool overlaps = false;
+        for (int i = 0; i < context->sceneList.count; i++) {
+            if (CheckCollisionRecs(previewBounds, context->sceneList.scenes[i].bounds)) {
+                overlaps = true;
+                break;
+            }
+        }
+
+        // Blink red border if invalid placement
+        Color previewColor;
+        if (overlaps) {
+            int blink = (int)(GetTime() * 4) % 2; // Fast blink
+            previewColor = blink ? RED : BLANK;
+        } else {
+            previewColor = Fade(DARKGREEN, 0.5f);
+        }
+
+        DrawRectangleLinesEx(previewBounds, 2, previewColor);
+    }
+
+    // === Cursor Reset ===
+    if (!cursorOverridden && !context->isResizingScene &&
+        !context->isResizingSceneVertically && !context->draggedScene) {
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+    }
+}
+
+// DRAW helper functions
+void ShrinkSceneToFitContent(SceneOutline *scene){
+    if (!scene || scene->nodeCount == 0) return;
+
+    const float paddingX = 20.0f;
+    const float paddingY = 20.0f;
+
+    float minX = FLT_MAX, minY = FLT_MAX;
+    float maxX = -FLT_MAX, maxY = -FLT_MAX;
+
+    for (int i = 0; i < scene->nodeCount; i++) {
+        Node *node = scene->containedNodes[i];
+        if (!node || node->type == NODE_COUNT) continue;
+
+        float nodeHeight = node->isExpanded ? node->height * 5 : node->height;
+
+        float left = node->position.x;
+        float top = node->position.y;
+        float right = left + node->width;
+        float bottom = top + nodeHeight;
+
+        if (left < minX) minX = left;
+        if (top < minY) minY = top;
+        if (right > maxX) maxX = right;
+        if (bottom > maxY) maxY = bottom;
+    }
+
+    scene->bounds.x = minX - paddingX;
+    scene->bounds.y = minY - (2*paddingY);
+    scene->bounds.width = (maxX - minX) + 2 * paddingX;
+    scene->bounds.height = (maxY - minY) + 2 * paddingY;
+}
+
 // DECORATORS
 // Draw expanded node
 void DrawNodeExpandIcon(Node *node, float size) {
@@ -353,6 +639,17 @@ void DrawNodeDeleteIcon(Node *node, float size) {
 
     // Draw the raygui icon centered
     GuiDrawIcon(ICON_CROSS_SMALL, (int)iconBounds.x, (int)iconBounds.y, 1, WHITE);
+}
+
+//INIT FUNCTIONS
+void CreateInitialScene(Context *context) {
+    if (context->sceneList.count < MAX_SCENES) {
+        SceneOutline scene = {
+            .bounds = (Rectangle){ 150, 150, 300, 200 }
+        };
+        strncpy(scene.name, "Intro", sizeof(scene.name));
+        context->sceneList.scenes[context->sceneList.count++] = scene;
+    }
 }
 
 //HELPER FUNCTIONS

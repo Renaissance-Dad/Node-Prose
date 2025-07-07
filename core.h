@@ -12,6 +12,22 @@ extern Font globalFont;
 #define MAX_CONNECTORS 12 //amount of connectors per node
 #define MAX_NODES 250     //amount of nodes in the graph
 #define MAX_BEZIERS 300   //amount of permanent bezier curves 
+#define MAX_SCENES 50     //amount of scenes inside a project
+#define MAX_SCENE_NODES 32
+
+typedef struct {
+    Rectangle bounds;
+    char name[32];
+    Node *containedNodes[MAX_SCENE_NODES];
+    Node *previousNodes[MAX_SCENE_NODES];
+    int previousNodeCount;
+    int nodeCount;
+} SceneOutline;
+
+typedef struct {
+    SceneOutline scenes[MAX_SCENES];
+    int count;
+} SceneList;
 
 typedef enum {
     VIEW_MODE_NODE,
@@ -64,7 +80,6 @@ typedef struct {
     Vector2 dragOffset;  // difference between mouse position and node corner
     double dragStartTime;
     Node *dragCandidateNode;
-    // doubleclicking - creating new node
     // Double-click tracking
     double lastClickTime;
     // bring to frong
@@ -79,6 +94,19 @@ typedef struct {
     int hoveredInputConnectorIndex;
     BezierCurve permanentBeziers[MAX_BEZIERS];
     int bezierCount;
+    // Draw scene context variables
+    SceneList sceneList;
+    bool isDrawingScene;
+    Vector2 sceneStartPos;
+    SceneOutline *draggedScene;
+    Vector2 sceneDragOffset;
+    bool isResizingScene;
+    bool isResizingSceneVertically;
+    SceneOutline *resizingScene;
+    float initialSceneWidth;
+    float initialSceneHeight;
+    float resizeStartX;
+    float resizeStartY;    
     // Panning
     bool isPanning;
     Vector2 panStartMouse;
@@ -134,10 +162,16 @@ void Behavior_ExpandIcon(Node *node, Context *context);
 void Behavior_CogIcon(Node *node, Context *context);
 void Behavior_FocusOnClick(Node *node, Context *context);
 void Behavior_ConnectorClick(Node *node, Context *context);
+void Scene_ShrinkClick(SceneOutline *scene, Context *context);
+void Scene_DeleteClick(SceneOutline *scene, Context *context);
 
 // General Behavior functions
 void HandleNodeCreationClick(Context *context, Node **head, Node *nodes);
 void Behavior_PanCanvas(Context *context);
+void Behavior_DrawSceneOutline(Context *context);
+void UpdateSceneNodeMembership(Context *context);
+
+
 
 //  node functions
 Node* CreateNodeAt(Vector2 position, Node *head, Node *nodes, Context *context);

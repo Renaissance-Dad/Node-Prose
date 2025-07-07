@@ -13,11 +13,18 @@ void DrawLiveBezier(Context *context);
 void DrawPermanentConnections(Context *context);
 void DrawPermanentConnectionsForNode(Node *node, Context *context);
 void DrawTopNodeAndConnections(Node *head, Context *context);
+void DrawSceneOutlines(Context *context);
 
-// DRAW DECORATORS
+// DRAW HELPER FUNCTIONS
+void ShrinkSceneToFitContent(SceneOutline *scene);
+
+// NODE DRAW DECORATORS
 void DrawNodeExpandIcon(Node *node, float size);
 void DrawNodeCogIcon(Node *node, float size);
 void DrawNodeDeleteIcon(Node *node, float size);
+
+// INIT FUNCTIONS
+void CreateInitialScene(Context *context);
 
 // HELPER FUNCTIONS
 const char* GetNodeTypeName(int type); //feed it an enum and get the string 

@@ -3,6 +3,7 @@
 #include "raylib.h"
 #include "raygui.h"
 #include "raymath.h"
+#include <float.h>
 
 #include "core.h"
 #include "ui.h"
@@ -46,8 +47,22 @@ int main(void)
         .connectingFromConnectorIndex = -1,
         .hoveredInputNode = NULL,
         .hoveredInputConnectorIndex = -1,
-        .bezierCount = 0
+        .bezierCount = 0,
+        .sceneList = {.count = 0},          // no scenes yet
+        .isDrawingScene = false,            // not currently drawing
+        .sceneStartPos = {0, 0},            // initial mouse origin (irrelevant at boot)
+        .draggedScene = NULL,
+        .sceneDragOffset = {0, 0},
+        .isResizingScene = false,
+        .isResizingSceneVertically = false,
+        .resizingScene = NULL,
+        .initialSceneWidth = 0,
+        .initialSceneHeight = 0,
+        .resizeStartX = 0,
+        .resizeStartY = 0
     };
+    
+    CreateInitialScene(&context);
     
     //initial node for testing
         head->position = (Vector2){ 200, 200 };
@@ -65,20 +80,23 @@ int main(void)
         HandleScreenToggle(&screen);
         HandleNodeCreationClick(&context, &head, nodes);
         Behavior_PanCanvas(&context);
+        Behavior_DrawSceneOutline(&context); 
         
         
         
         DispatchNodeBehaviors(head, &context);
+        
+        UpdateSceneNodeMembership(&context);
         
         
 
         BeginDrawing();
             ClearBackground(ORANGE);
             DrawBackground(&screen);
-            DrawMenuBar(&screen);
             
             if (screen.currentView == VIEW_MODE_NODE) {
             
+                DrawSceneOutlines(&context);
                 DrawAllNodes(head, &context);
                 DrawPermanentConnections(&context);
                 DrawTopNodeAndConnections(head, &context);
@@ -87,6 +105,9 @@ int main(void)
             } else if (screen.currentView == VIEW_MODE_SCRIPT) {
                 DrawText("SCRIPT VIEW (not implemented yet)", 50, 100, 28, DARKGRAY);
             }
+           
+           
+            DrawMenuBar(&screen);
         EndDrawing();
     }
 
@@ -123,41 +144,85 @@ void HandleScreenToggle(ScreenSettings *screen){
     }
 }
 
+// Draw Scene behaviour
+void Behavior_DrawSceneOutline(Context *context) {
+    Vector2 mouse = GetMousePosition();
 
+    // === Begin Scene Draw on Right-Click ===
+    if (!context->isDrawingScene && IsMouseButtonPressed(MOUSE_RIGHT_BUTTON)) {
+        // Pre-check if mouse is inside any existing scene → block drawing start
+        for (int i = 0; i < context->sceneList.count; i++) {
+            if (CheckCollisionPointRec(mouse, context->sceneList.scenes[i].bounds)) {
+                return; // 🚫 don't start drawing inside a scene
+            }
+        }
 
+        context->sceneStartPos = mouse;
+        context->isDrawingScene = true;
+    }
 
+    // === Finalize Scene Creation ===
+    if (context->isDrawingScene && IsMouseButtonReleased(MOUSE_RIGHT_BUTTON)) {
+        Vector2 end = mouse;
+        Vector2 topLeft = {
+            fminf(context->sceneStartPos.x, end.x),
+            fminf(context->sceneStartPos.y, end.y)
+        };
+        Vector2 size = {
+            fabsf(end.x - context->sceneStartPos.x),
+            fabsf(end.y - context->sceneStartPos.y)
+        };
 
-// specific behaviour function for dragging 
+        Rectangle newBounds = {topLeft.x, topLeft.y, size.x, size.y};
+
+        // Prevent overlap with existing scenes
+        bool overlapsExisting = false;
+        for (int i = 0; i < context->sceneList.count; i++) {
+            if (CheckCollisionRecs(newBounds, context->sceneList.scenes[i].bounds)) {
+                overlapsExisting = true;
+                break;
+            }
+        }
+
+        if (!overlapsExisting && context->sceneList.count < MAX_SCENES) {
+            context->sceneList.scenes[context->sceneList.count++] = (SceneOutline){
+                .bounds = newBounds
+            };
+        }
+
+        context->isDrawingScene = false;
+    }
+}
+
+// specific behaviour function for dragging
 void Behavior_Drag(Node *node, Context *context) {
     if (node->type == NODE_COUNT) return;
-    
-     // 🛑 Don't allow dragging during connector click
+
+    // 🛑 Don’t allow dragging during connector click
     if (context->connecting) return;
+
+    float nodeHeight = node->isExpanded ? node->height * 5 : node->height;
 
     Rectangle bounds = {
         node->position.x,
         node->position.y,
         node->width,
-        (float)(node->isExpanded ? node->height * 5 : node->height)
+        nodeHeight
     };
 
     Vector2 mouse = GetMousePosition();
     double now = GetTime();
 
+    // Step 1: Begin drag
     if (!context->isDragging) {
-        // Step 1: Mouse pressed on a node — mark candidate
         if (CheckCollisionPointRec(mouse, bounds) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             context->dragCandidateNode = node;
             context->dragStartTime = now;
             context->bringToFront = node;
         }
 
-        // Step 2: Candidate delay logic
-        if (context->dragCandidateNode != NULL &&
-            context->dragCandidateNode == node &&
-            IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
-            
-            if ((now - context->dragStartTime) >= 0.09) { // 90ms delay
+        if (context->dragCandidateNode == node && IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+            if ((now - context->dragStartTime) >= 0.09) {
                 context->isDragging = true;
                 context->draggedNode = node;
                 context->dragOffset = Vector2Subtract(mouse, node->position);
@@ -165,56 +230,72 @@ void Behavior_Drag(Node *node, Context *context) {
             }
         }
 
-        // Step 3: Cancel candidate if mouse released early
-        if (context->dragCandidateNode != NULL &&
-            context->dragCandidateNode == node &&
-            IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
-            
+        if (context->dragCandidateNode == node && IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
             context->dragCandidateNode = NULL;
         }
     }
 
-    // Step 4: Active dragging
+    // Step 2: Active dragging
     if (context->isDragging && context->draggedNode == node) {
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
             node->position = Vector2Subtract(mouse, context->dragOffset);
-
-            // 🔁 Update connector positions to follow the node
             UpdateConnectorPositions(node);
-            
-            // 🔁 Update all bezier curves that connect to this node
-           
-            for (int j = 0; j < MAX_BEZIERS; j++) {
 
+            // Update connected bezier curves
+            for (int j = 0; j < MAX_BEZIERS; j++) {
                 BezierCurve *curve = &context->permanentBeziers[j];
 
-            
-                    
-                // If this node is the FROM node in a curve
                 if (node == curve->fromNode) {
-                    Vector2 start = Vector2Subtract(mouse, context->dragOffset);
+                    Vector2 start = node->position;
                     Vector2 start2 = Vector2Add(start, curve->relativeposition[0]);
                     curve->points[0] = start2;
-                    curve->points[1] = (Vector2){start2.x + 50, start2.y};
-                    
-                    
-                    
+                    curve->points[1] = (Vector2){ start2.x + 50, start2.y };
+                }
 
-                } 
-                
                 if (node == curve->toNode) {
-                    
-                    
-                    
-                    Vector2 end = Vector2Subtract(mouse, context->dragOffset);
+                    Vector2 end = node->position;
                     Vector2 end2 = Vector2Add(end, curve->relativeposition[1]);
-                    curve->points[2] = (Vector2){end2.x - 50, end2.y};
+                    curve->points[2] = (Vector2){ end2.x - 50, end2.y };
                     curve->points[3] = end2;
-                    
-                    
-                    
-                    
-                } 
+                }
+            }
+
+            // 🔁 Scene-aware directional snap logic
+            for (int i = 0; i < context->sceneList.count; i++) {
+                SceneOutline *scene = &context->sceneList.scenes[i];
+                Rectangle sceneBounds = scene->bounds;
+
+                Rectangle nodeBounds = {
+                    node->position.x,
+                    node->position.y,
+                    (float)node->width,
+                    nodeHeight
+                };
+
+                bool topLeftInside = CheckCollisionPointRec(node->position, sceneBounds);
+                bool stillIntersecting = CheckCollisionRecs(nodeBounds, sceneBounds);
+
+                if (!topLeftInside && stillIntersecting) {
+                    Vector2 offset = {0};
+
+                    // Snap horizontally (left side)
+                    if (node->position.x < sceneBounds.x &&
+                        nodeBounds.x + nodeBounds.width > sceneBounds.x) {
+                        offset.x = -(nodeBounds.x + nodeBounds.width - sceneBounds.x + 1);
+                    }
+
+                    // Snap vertically (top side)
+                    if (node->position.y < sceneBounds.y &&
+                        nodeBounds.y + nodeBounds.height > sceneBounds.y) {
+                        offset.y = -(nodeBounds.y + nodeBounds.height - sceneBounds.y + 1);
+                    }
+
+                    if (offset.x != 0 || offset.y != 0) {
+                        node->position.x += offset.x;
+                        node->position.y += offset.y;
+                        UpdateConnectorPositions(node);
+                    }
+                }
             }
 
             SetMouseCursor(MOUSE_CURSOR_RESIZE_ALL);
@@ -225,6 +306,7 @@ void Behavior_Drag(Node *node, Context *context) {
         }
     }
 }
+
 
 // Dispatch of behaviours
 void DispatchNodeBehaviors(Node *head, Context *context) {
@@ -329,8 +411,71 @@ Node* CreateNodeAt(Vector2 position, Node *head, Node *nodes, Context *context) 
     return head; // fallback: no available slot
 }
 
+// behavior for scene magic wand click
+void Scene_ShrinkClick(SceneOutline *scene, Context *context) {
+    float iconSize = 16.0f;
+    float iconPadding = 4.0f;
+
+    Rectangle wandBounds = {
+        scene->bounds.x + scene->bounds.width - (2 * (iconSize + iconPadding)),
+        scene->bounds.y + iconPadding,
+        iconSize,
+        iconSize
+    };
+
+    Vector2 mouse = GetMousePosition();
+
+       
+    // === Hover feedback ===
+    bool isHovered = CheckCollisionPointRec(mouse, wandBounds);
+    Color bg = isHovered ? LIME : DARKGREEN;
+    if (context->draggedNode || context->draggedScene != NULL) bg = DARKGREEN;
+    DrawRectangleRec(wandBounds, bg);
+    GuiDrawIcon(ICON_LASER, (int)wandBounds.x, (int)wandBounds.y, 1, WHITE);
 
 
+
+    // === Click logic ===
+    if (isHovered && IsMouseButtonPressed(MOUSE_LEFT_BUTTON) &&
+    !context->draggedNode && !context->draggedScene) {
+        ShrinkSceneToFitContent(scene);
+    }
+}
+
+void Scene_DeleteClick(SceneOutline *scene, Context *context) {
+    float iconSize = 16.0f;
+    float iconPadding = 4.0f;
+    
+    Rectangle xBounds = {
+        scene->bounds.x + scene->bounds.width - iconSize - iconPadding,
+        scene->bounds.y + iconPadding,
+        iconSize,
+        iconSize
+    };  
+
+    Vector2 mouse = GetMousePosition();
+    
+    // === Hover feedback ===
+    bool isHovered = CheckCollisionPointRec(mouse, xBounds);
+    Color bg = isHovered ? LIME : DARKGREEN;
+     if (context->draggedNode || context->draggedScene != NULL) bg = DARKGREEN;
+    DrawRectangleRec(xBounds, bg);
+    GuiDrawIcon(ICON_CROSS_SMALL, (int)xBounds.x, (int)xBounds.y, 1, WHITE);
+
+    
+    if (isHovered && IsMouseButtonPressed(MOUSE_LEFT_BUTTON) &&
+    !context->draggedNode && !context->draggedScene) {
+        for (int i = 0; i < context->sceneList.count; i++) {
+            if (&context->sceneList.scenes[i] == scene) {
+                for (int j = i; j < context->sceneList.count - 1; j++) {
+                    context->sceneList.scenes[j] = context->sceneList.scenes[j + 1];
+                }
+                context->sceneList.count--;
+                break;
+            }
+        }
+    }
+}
 
 
 // delete node behavior function
@@ -667,10 +812,6 @@ void Behavior_ConnectorClick(Node *node, Context *context) {
     }
 }
 
-
-
-
-
 //full canvas panning
 void Behavior_PanCanvas(Context *context) {
     Vector2 mouse = GetMousePosition();
@@ -687,6 +828,7 @@ void Behavior_PanCanvas(Context *context) {
         if (IsMouseButtonDown(MOUSE_MIDDLE_BUTTON)) {
             Vector2 delta = Vector2Subtract(mouse, context->panStartMouse);
 
+            // Move nodes
             Node *current = *(context->head);
             while (current != NULL) {
                 current->position = Vector2Add(current->position, delta);
@@ -694,11 +836,28 @@ void Behavior_PanCanvas(Context *context) {
                 current = current->nextZ;
             }
 
-            // Also move bezier anchors
+            // Move bezier anchors and relative positions
             for (int i = 0; i < context->bezierCount; i++) {
+                BezierCurve *curve = &context->permanentBeziers[i];
+
+                // Move anchor points
                 for (int j = 0; j < 4; j++) {
-                    context->permanentBeziers[i].points[j] = Vector2Add(context->permanentBeziers[i].points[j], delta);
+                    curve->points[j] = Vector2Add(curve->points[j], delta);
                 }
+
+                /*
+                // Move relative positions too
+                for (int j = 0; j < 2; j++) {
+                    curve->relativeposition[j].x += delta.x;
+                    curve->relativeposition[j].y += delta.y;
+                }
+                */
+            }
+
+            // Move scene outlines
+            for (int i = 0; i < context->sceneList.count; i++) {
+                context->sceneList.scenes[i].bounds.x += delta.x;
+                context->sceneList.scenes[i].bounds.y += delta.y;
             }
 
             context->panStartMouse = mouse;
@@ -709,11 +868,128 @@ void Behavior_PanCanvas(Context *context) {
     }
 }
 
+//function that adds nodes into scene visually
+void UpdateSceneNodeMembership(Context *context) {
+    if (!context || !context->nodes) return;
+    
+    
+    if (context->isDragging || context->draggedNode != NULL) {
+        return;
+    }
 
+    const float paddingX = 20.0f;
+    const float paddingY = 20.0f;
 
+    for (int s = 0; s < context->sceneList.count; s++) {
+        SceneOutline *scene = &context->sceneList.scenes[s];
 
+        // Skip active resizing (we still want to allow node dragging logic)
+        if (context->resizingScene == scene) continue;
 
+        // Backup previous state
+        memcpy(scene->previousNodes, scene->containedNodes, sizeof(scene->containedNodes));
+        scene->previousNodeCount = scene->nodeCount;
+        scene->nodeCount = 0;
 
+        Rectangle sceneBounds = scene->bounds;
+
+        for (int i = 0; i < MAX_NODES; i++) {
+            Node *node = &context->nodes[i];
+            if (node->type == NODE_COUNT) continue;
+
+            // Compute bounding box of this node
+            float nodeHeight = node->isExpanded ? node->height * 5 : node->height;
+            Rectangle nodeBounds = {
+                node->position.x,
+                node->position.y,
+                (float)node->width,
+                nodeHeight
+            };
+
+            bool topLeftInside = CheckCollisionPointRec(node->position, sceneBounds);
+            bool intersects = CheckCollisionRecs(nodeBounds, sceneBounds);
+
+            // Check previous membership
+            bool wasInScene = false;
+            for (int j = 0; j < scene->previousNodeCount; j++) {
+                if (scene->previousNodes[j] == node) {
+                    wasInScene = true;
+                    break;
+                }
+            }
+
+            // === CASE A: Node was NOT in scene, but now is (top-left inside)
+            if (!wasInScene && topLeftInside) {
+                // Expand bounds immediately to fit node fully
+                float requiredLeft   = fminf(sceneBounds.x, nodeBounds.x - paddingX);
+                float requiredTop    = fminf(sceneBounds.y, nodeBounds.y - paddingY);
+                float requiredRight  = fmaxf(sceneBounds.x + sceneBounds.width, nodeBounds.x + nodeBounds.width + paddingX);
+                float requiredBottom = fmaxf(sceneBounds.y + sceneBounds.height, nodeBounds.y + nodeBounds.height + paddingY);
+
+                sceneBounds.x = requiredLeft;
+                sceneBounds.y = requiredTop;
+                sceneBounds.width = requiredRight - requiredLeft;
+                sceneBounds.height = requiredBottom - requiredTop;
+
+                if (scene->nodeCount < MAX_SCENE_NODES) {
+                    scene->containedNodes[scene->nodeCount++] = node;
+                }
+            }
+
+            // === CASE B: Node was already in scene
+            else if (wasInScene) {
+                if (topLeftInside) {
+                    // Only expand bounds if not actively dragging this node
+                    if (context->draggedNode != node) {
+                        float requiredRight  = nodeBounds.x + nodeBounds.width + paddingX;
+                        float requiredBottom = nodeBounds.y + nodeBounds.height + paddingY;
+
+                        float currentRight = sceneBounds.x + sceneBounds.width;
+                        float currentBottom = sceneBounds.y + sceneBounds.height;
+
+                        if (requiredRight > currentRight) {
+                            sceneBounds.width = requiredRight - sceneBounds.x;
+                        }
+
+                        if (requiredBottom > currentBottom) {
+                            sceneBounds.height = requiredBottom - sceneBounds.y;
+                        }
+                    }
+
+                    if (scene->nodeCount < MAX_SCENE_NODES) {
+                        scene->containedNodes[scene->nodeCount++] = node;
+                    }
+                }
+                // Optional: if top-left is now outside → drop node from scene
+            }
+
+            // === CASE C: Node intersects but was never in the scene
+            else if (!wasInScene && !topLeftInside && intersects) {
+                // Push scene to include this node (move top/left if needed)
+                float requiredLeft   = fminf(sceneBounds.x, nodeBounds.x - paddingX);
+                float requiredTop    = fminf(sceneBounds.y, nodeBounds.y - paddingY);
+                float requiredRight  = fmaxf(sceneBounds.x + sceneBounds.width, nodeBounds.x + nodeBounds.width + paddingX);
+                float requiredBottom = fmaxf(sceneBounds.y + sceneBounds.height, nodeBounds.y + nodeBounds.height + paddingY);
+
+                sceneBounds.x = requiredLeft;
+                sceneBounds.y = requiredTop;
+                sceneBounds.width = requiredRight - requiredLeft;
+                sceneBounds.height = requiredBottom - requiredTop;
+
+                // Re-check top-left inclusion
+                if (CheckCollisionPointRec(node->position, sceneBounds)) {
+                    if (scene->nodeCount < MAX_SCENE_NODES) {
+                        scene->containedNodes[scene->nodeCount++] = node;
+                    }
+                }
+            }
+
+            // Else: not in scene, not intersecting → ignore
+        }
+
+        scene->bounds = sceneBounds;
+    }
+}
 
 // DEBUG FUNCTIONS 
 /*
